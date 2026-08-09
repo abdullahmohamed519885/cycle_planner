@@ -100,7 +100,11 @@ export default async function handler(req, res) {
     // 3. لو مش موجود أضفه
     else {
       response = await fetch(
-        `${url}/rest/v1/cycle_reminders`,
+        console.log("SUPABASE URL:", url);
+console.log(
+  "TABLE URL:",
+  `${url}/rest/v1/cycle_reminders`
+);,
         {
           method: "POST",
           headers: {

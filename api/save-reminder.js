@@ -9,25 +9,24 @@ function getSupabase() {
   return { url, key };
 }
 
-function supabaseHeaders(key, extra = {}) {
-  return {
-    "Content-Type": "application/json",
-    "apikey": key,
-    ...extra
-  };
-}
-
 export default async function handler(req, res) {
   if (req.method !== "POST") {
-    return res.status(405).json({ error: "Method not allowed" });
+    return res.status(405).json({
+      error: "Method not allowed"
+    });
   }
 
   try {
     const { url, key } = getSupabase();
-    const body = req.body || {};
 
-    const email = String(body.email || "").trim().toLowerCase();
-    const startDate = String(body.startDate || "").trim();
+    const {
+      startDate,
+      duration,
+      cycleLength,
+      reminderDays,
+      email,
+      timezone
+    } = req.body || {};
 
     if (!startDate || !email) {
       return res.status(400).json({
@@ -36,87 +35,92 @@ export default async function handler(req, res) {
     }
 
     const row = {
-      email,
+      email: String(email).trim().toLowerCase(),
       start_date: startDate,
-      duration_days: Number(body.duration || 5),
-      cycle_length: Number(body.cycleLength || 28),
-      reminder_days: Number(body.reminderDays || 3),
-      timezone: String(body.timezone || "UTC"),
+      duration_days: Number(duration || 5),
+      cycle_length: Number(cycleLength || 28),
+      reminder_days: Number(reminderDays || 3),
+      timezone: timezone || "UTC",
       active: true
     };
 
-    /*
-      Do not use ?on_conflict=email here.
-      Older versions of the table may not have a UNIQUE constraint on email.
-      Instead, find the row first, then PATCH it or INSERT it.
-    */
+    // 1. ابحث عن البريد أولًا
     const lookupUrl =
       `${url}/rest/v1/cycle_reminders` +
-      `?email=eq.${encodeURIComponent(email)}` +
-      `&select=id&limit=1`;
+      `?select=id` +
+      `&email=eq.${encodeURIComponent(row.email)}` +
+      `&limit=1`;
 
-    const lookup = await fetch(lookupUrl, {
+    const lookupResponse = await fetch(lookupUrl, {
       method: "GET",
       headers: {
-        "apikey": key
+        "apikey": key,
+        "Authorization": `Bearer ${key}`
       }
     });
 
-    const lookupText = await lookup.text();
+    const lookupText = await lookupResponse.text();
 
-    if (!lookup.ok) {
-      console.error("Supabase lookup error:", lookup.status, lookupText);
+    if (!lookupResponse.ok) {
       return res.status(500).json({
-        error: "Supabase save failed",
-        stage: "lookup",
-        status: lookup.status,
-        details: lookupText
+        error: "Supabase lookup failed",
+        status: lookupResponse.status,
+        details: lookupText,
+        url_used: lookupUrl.replace(row.email, "***")
       });
     }
 
     let existing = [];
+
     try {
-      existing = lookupText ? JSON.parse(lookupText) : [];
+      existing = JSON.parse(lookupText);
     } catch {
       existing = [];
     }
 
     let response;
 
+    // 2. لو موجود حدثه
     if (existing.length > 0) {
       response = await fetch(
-        `${url}/rest/v1/cycle_reminders?id=eq.${encodeURIComponent(existing[0].id)}`,
+        `${url}/rest/v1/cycle_reminders?id=eq.${existing[0].id}`,
         {
           method: "PATCH",
-          headers: supabaseHeaders(key, {
+          headers: {
+            "Content-Type": "application/json",
+            "apikey": key,
+            "Authorization": `Bearer ${key}`,
             "Prefer": "return=minimal"
-          }),
-          body: JSON.stringify(row)
-        }
-      );
-    } else {
-      response = await fetch(
-        `${url}/rest/v1/cycle_reminders`,
-        {
-          method: "POST",
-          headers: supabaseHeaders(key, {
-            "Prefer": "return=minimal"
-          }),
+          },
           body: JSON.stringify(row)
         }
       );
     }
 
-    const text = await response.text();
+    // 3. لو مش موجود أضفه
+    else {
+      response = await fetch(
+        `${url}/rest/v1/cycle_reminders`,
+        {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "apikey": key,
+            "Authorization": `Bearer ${key}`,
+            "Prefer": "return=minimal"
+          },
+          body: JSON.stringify(row)
+        }
+      );
+    }
+
+    const responseText = await response.text();
 
     if (!response.ok) {
-      console.error("Supabase write error:", response.status, text);
-
       return res.status(500).json({
         error: "Supabase save failed",
-        stage: existing.length > 0 ? "update" : "insert",
         status: response.status,
-        details: text
+        details: responseText
       });
     }
 
@@ -124,8 +128,9 @@ export default async function handler(req, res) {
       ok: true,
       action: existing.length > 0 ? "updated" : "created"
     });
+
   } catch (error) {
-    console.error("Save reminder error:", error);
+    console.error(error);
 
     return res.status(500).json({
       error: error.message || "Server error"
